@@ -1,0 +1,155 @@
+Threat Hunting in M365 Environment
+
+1. Mailbox Email Forwarding
+Exchange Online Configuration:
+Get-Mailbox -ResultSize Unlimited | Where-Object {($Null -ne $_.ForwardingSmtpAddress)} | Select Identity,Name,ForwardingSmtpAddress
+Unified Audit Log:
+$logs = Search-UnifiedAuditLog -Operations set-mailbox -StartDate 2022-01-01 -EndDate 2022-06-30
+ForEach ($record in $logs){
+    $AuditData = $record.AuditData | ConvertFrom-Json
+    if ( $AuditData.Parameters | Where-Object Name -eq 'forwardingsmtpaddress' ) 
+    {$record}} 
+
+2. Inbox Rule - Auto Email Forward
+Exchange Online Configuration:
+$Mailboxes = Get-Mailbox ; foreach ($Mailbox in $Mailboxes) { Get-InboxRule -mailbox $Mailbox.Name | Where-Object {($Null -ne $_.ForwardTo) -or ($Null -ne $_.RedirectTo) -or ($Null -ne $_.ForwardAsAttachmentTo) } | select-object identity,Name,Enabled,ForwardAsAttachmentTo,ForwardTo,RedirectTo }
+Unified Audit Log:
+$logs = Search-UnifiedAuditLog -operations new-inboxrule,set-inboxrule -StartDate 2022-01-01 -EndDate 2022-07-08
+ForEach ($record in $logs){
+    $AuditData = $record.AuditData | ConvertFrom-Json
+    if ( $AuditData.Parameters | Where-Object {($_.Name -like 'ForwardTo') -or ($_.Name -eq 'RedirectTo') -or ($_.Name -eq 'ForwardAsAttachmentTo')}) 
+    {$record}} 
+
+3. Transport Rules - Auto Email Forward
+Exchange Online Configuration:
+Get-TransportRule | where-object{($Null -ne $_.BlindCopyTo)}
+Admin Audit Log:
+Search-AdminAuditLog -Cmdlets New-TransportRule,Set-TransportRule -parameter BlindCopyTo
+Unified Audit Log:
+ $logs = Search-UnifiedAuditLog -Operations New-TransportRule, Set-TransportRule -StartDate 2022-01-01 -EndDate 2022-06-30
+ 
+ 4.Full Access Delegation Settings
+ Exchange Online Configuration:
+ Get-Mailbox -Resultsize Unlimited | Get-MailboxPermission | Where-Object { ($_.Accessrights -like "FullAccess")}
+ Unified Audit Log:
+ $logs = Search-UnifiedAuditLog -operations add-mailboxpermission -StartDate 2022-01-01 -EndDate 2022-07-08
+ForEach ($record in $logs){
+    $AuditData = $record.AuditData | ConvertFrom-Json
+    if ( $AuditData.Parameters | Where-Object {($_.Value -eq 'FullAccess')}) 
+    {$record}} 
+    
+  5. SendAs Delegation Settings
+  Exchange Online Configuration: 
+  Get-Mailbox -Resultsize Unlimited | Get-RecipientPermission | where-Object { ($_.Accessrights -like "SendAs")} 
+  Unified Audit Log:
+  $logs = Search-UnifiedAuditLog -operations Add-RecipientPermission -StartDate 2022-01-01 -EndDate 2022-07-20
+  ForEach ($record in $logs){
+    $AuditData = $record.AuditData | ConvertFrom-Json
+    if ( $AuditData.Parameters | Where-Object {($_.Value -eq 'SendAs')}) 
+    {$record}} 
+
+6.Mailbox Folder Permissions
+Exchange Online Configuration: 
+$mailboxes = Get-Mailbox -ResultSize Unlimited
+ForEach ($record in $logs){
+$AuditData = $record.AuditData | ConvertFrom-Json
+if ( $AuditData.Parameters | Where-Object {($_.Value -like 'Anonymous') -or ($_.Value -eq 'Default') }) {$record}}
+Unified Audit Log:
+$logs = Search-UnifiedAuditLog -operations add-MailboxFolderPermission,Set-MailboxFolderPermission -StartDate 2022-01-01 -EndDate 2022-07-08
+ForEach ($record in $logs){
+    $AuditData = $record.AuditData | ConvertFrom-Json
+    if ( $AuditData.Parameters | Where-Object {($_.Value -like ''Anonymous'') -or ($_.Value -eq 'Default') }) {$record}} 
+
+7.List all the flows. Look for email autoforward and data extraction flows.
+Power Automate:
+$flowCollection = @()
+Connect-MsolService 
+$users = Get-MsolUser -All | Select-Object UserPrincipalName, ObjectId
+$flows = get-AdminFlow
+   foreach($flow in $flows){
+    $flowProperties = $flow.internal.properties
+    $Creator = $users | where-object{$_.ObjectId -eq $flowProperties.creator.UserID}
+    $triggers = $flowProperties.definitionsummary.triggers
+    $actions = $flowProperties.definitionsummary.actions | where-object {$_.swaggerOperationId}
+        [datetime]$modifiedTime = $flow.LastModifiedTime
+    [datetime]$createdTime = $flowProperties.createdTime
+    $flowCollection += new-object psobject -property @{displayName = $flowProperties.displayName;environment = $flowProperties.Environment.name;State = $flowProperties.State;Triggers = $triggers.swaggerOperationId;Actions = $actions.swaggerOperationId;Created = $createdTime.ToString("dd-MM-yyyy HH:mm:ss");Modified = $modifiedTime.ToString("dd-MM-yyyy HH:mm:ss");CreatedBy = $Creator.userPrincipalName
+}
+    $flowCollection
+}
+
+8.List identities with Application Impersonation Role 
+Azure AD Tenant:
+$AppImperGroups = Get-RoleGroup | Where-Object Roles -like ApplicationImpersonation
+ForEach ($Group in $AppImperGroups)
+{
+ Get-RoleGroupMember $Group.Name
+ }
+
+PS C:\> Get-ManagementRoleAssignment -Role ApplicationImpersonation
+
+Unified Audit Log:
+$logs = Search-UnifiedAuditLog -operations 'New-RoleGroup, New-ManagementRoleAssignment,set-ManagementRoleAssignment'  -StartDate 2022-01-01 -EndDate 2022-07-08
+ForEach ($record in $logs){
+$AuditData = $record.AuditData | ConvertFrom-Json
+if ( $AuditData.Parameters | Where-Object {($_.Value -like 'ApplicationImpersonation')})
+{$record}}
+
+9.List all Service principal and their OAuth permission Grants
+  Azure AD Tenant:
+Get-AzureADServicePrincipal  | ForEach-Object{
+$spn = $_;
+$objID = $spn.ObjectID;
+$grants = Get-AzureADServicePrincipalOAuth2PermissionGrant -ObjectId $objID;
+foreach ($grant in $grants)
+{
+$user = Get-AzureADUser -ObjectId $grant.PrincipalId;
+$OAuthGrant = New-Object PSObject;
+$OAuthGrant | Add-Member Noteproperty 'ObjectID' $grant.objectId;
+$OAuthGrant | Add-Member Noteproperty 'User' $user.UserPrincipalName;
+$OAuthGrant | Add-Member Noteproperty 'AppDisplayName' $spn.DisplayName;
+$OAuthGrant | Add-Member Noteproperty 'AppPublisherName' $spn.PublisherName;
+$OAuthGrant | Add-Member Noteproperty 'AppReplyURLs' $spn.ReplyUrls;
+$OAuthGrant | Add-Member Noteproperty 'GrantConsentType' $grant.consentType;
+$OAuthGrant | Add-Member Noteproperty 'GrantScopes' $grant.scope;
+}
+Write-Output $OAuthGrant
+}
+
+10. Anonymous Link Created/Updated in Sharepoint Online
+Unified Audit Log:
+Search-UnifiedAuditLog -recordtype SharePointSharingOperation -operations 'anonymouslinkcreated,anonymouslinkupdated' -startdate 2022-07-30 -enddate 2022-08-01
+
+11. Anonymous Link usage in Sharepoint Online
+Unified Audit Log:
+Search-UnifiedAuditLog -recordtype SharePointSharingOperation -operations 'AnonymousLinkUsed' -startdate 2022-07-30 -enddate 2022-08-01
+
+12.List all Service Principals configured  with secrets in Azure AD
+Azure AD:
+$Spns = Get-AzureADServicePrincipal -All $true
+foreach ($Spn in $Spns) {
+    if ($Spn.PasswordCredentials.Count -ne 0 -or $Spn.KeyCredentials.Count -ne 0) {
+    Write-Host 'Application Display Name::'$Spn.DisplayName
+    Write-Host 'Application Password Count::' $Spn.PasswordCredentials.Count
+    Write-Host 'Application Key Count::' $Spn.KeyCredentials.Count
+    Write-Host ''
+    } }
+    
+    
+13.List all Applications configured  with secrets in Azure AD
+Azure AD:
+  PS>$Apps = Get-AzureAD Application -All $True
+foreach ($App in $Apps) {
+  if ($App.PasswordCredentials.Count -ne 0 -or $App.KeyCredentials.Count -ne 0) 
+  {
+  Write-Host 'Application Display Name::'$App.DisplayName
+  Write-Host 'Application Password Count::' $App.PasswordCredentials.Count
+  Write-Host 'Application Key Count::' $App.KeyCredentials.Count
+  Write-Host ''
+  } }
+ Unified Audit Logs:
+  Search-UnifiedAuditLog -operations 'Update application – Certificates and secrets management' -startdate 2022-06-24 -enddate 2022-06-26
+
+
+
+
